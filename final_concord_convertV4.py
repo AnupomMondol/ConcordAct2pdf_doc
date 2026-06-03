@@ -125,6 +125,7 @@ def parse_mcq(node: dict):
         "prompt": html_to_text(_kget(state, "prompt", "")),
         "multiple_answers": bool(_kget(state, "multipleAnswers", False)),
         "has_feedback": any(c["feedback"] for c in choices),
+        "has_correct": any(c["correct"] for c in choices),
         "choices": choices,
     }
 
@@ -160,19 +161,26 @@ def build_answer_key_html(mcq: dict) -> str:
     else:
         correct_html = ""
 
+    has_feedback = any(c["feedback"] for c in mcq["choices"])
+
     rows = []
-    for c in mcq["choices"]:
-        if c["correct"]:
-            mark, color = "\u2713", "#2e7d32"   # check
-        else:
-            mark, color = "\u2717", "#c62828"   # cross
-        fb = f' &mdash; {esc(c["feedback"])}' if c["feedback"] else ""
-        rows.append(
-            f'<li style="margin:3px 0;">'
-            f'<span style="color:{color};font-weight:700;">{mark}</span> '
-            f'<span style="font-weight:600;">{esc(c["content"])}</span>'
-            f'<span style="color:#444;">{fb}</span></li>'
-        )
+    if has_feedback:
+        # Full per-choice breakdown with marks and feedback text.
+        for c in mcq["choices"]:
+            if c["correct"]:
+                mark, color = "\u2713", "#2e7d32"   # check
+            else:
+                mark, color = "\u2717", "#c62828"   # cross
+            fb = f' &mdash; {esc(c["feedback"])}' if c["feedback"] else ""
+            rows.append(
+                f'<li style="margin:3px 0;">'
+                f'<span style="color:{color};font-weight:700;">{mark}</span> '
+                f'<span style="font-weight:600;">{esc(c["content"])}</span>'
+                f'<span style="color:#444;">{fb}</span></li>'
+            )
+
+    list_html = ('<ul style="margin:4px 0 0 0;padding-left:18px;list-style:none;">'
+                 + "".join(rows) + '</ul>') if rows else ""
 
     return (
         '<div data-answer-key="1" style="'
@@ -182,10 +190,9 @@ def build_answer_key_html(mcq: dict) -> str:
         'page-break-inside:avoid;-webkit-print-color-adjust:exact;print-color-adjust:exact;">'
         '<div style="font-weight:700;color:#2e7d32;margin-bottom:6px;font-size:14px;">'
         'Answer Key</div>'
-        + correct_html +
-        '<ul style="margin:4px 0 0 0;padding-left:18px;list-style:none;">'
-        + "".join(rows) +
-        '</ul></div>'
+        + correct_html
+        + list_html +
+        '</div>'
     )
 
 
@@ -199,28 +206,91 @@ def build_answer_key_html(mcq: dict) -> str:
 #         questionType == iframe_interactive-> interactive placeholder
 # ──────────────────────────────────────────────────────────────────────────
 _IMG_RE = re.compile(r'<img\b[^>]*?\bsrc\s*=\s*["\']([^"\']+)["\'][^>]*>', re.I)
+_TABLE_RE = re.compile(r'(?is)<table\b.*?</table>')
+_TR_RE = re.compile(r'(?is)<tr\b[^>]*>(.*?)</tr>')
+_CELL_RE = re.compile(r'(?is)<(t[dh])\b([^>]*)>(.*?)</\1>')
+
+# Named HTML colors used in the authored tables -> hex for Word shading.
+_COLOR_HEX = {
+    "lightgrey": "D9D9D9", "lightgray": "D9D9D9", "grey": "BFBFBF", "gray": "BFBFBF",
+    "lightgreen": "C6EFCE", "lightyellow": "FFF2CC", "lightblue": "BDD7EE",
+    "lightcyan": "DEEBF7", "white": "FFFFFF", "yellow": "FFF2CC", "green": "C6EFCE",
+}
+
+
+def _cell_fill(attrs: str):
+    """Extract a fill color (hex) from a cell's bgcolor=/style=background attributes."""
+    m = re.search(r'bgcolor\s*=\s*["\']?([#\w]+)', attrs, re.I)
+    if not m:
+        m = re.search(r'background(?:-color)?\s*:\s*([#\w]+)', attrs, re.I)
+    if not m:
+        return None
+    val = m.group(1).strip().lower()
+    if val.startswith("#"):
+        return val[1:].upper().ljust(6, "0")[:6]
+    return _COLOR_HEX.get(val)
+
+
+def parse_html_table(table_html: str):
+    """Parse a <table> into {'rows': [[{text,fill,header}, ...], ...]}."""
+    rows = []
+    for tr in _TR_RE.findall(table_html):
+        cells = []
+        for tag, attrs, inner in _CELL_RE.findall(tr):
+            img_m = _IMG_RE.search(inner)
+            img_src = ""
+            if img_m:
+                img_src = _html.unescape(img_m.group(1)).strip()
+                if img_src.lower().startswith("data:"):
+                    img_src = ""
+            cells.append({
+                "text": html_to_text(inner),
+                "image": img_src,
+                "fill": _cell_fill(attrs),
+                "header": (tag.lower() == "th"),
+            })
+        if cells:
+            rows.append(cells)
+    return {"rows": rows} if rows else None
 
 
 def html_to_blocks(html: str):
-    """Convert a block of authored HTML into an ordered list of content blocks:
-    {'type':'text','text':...} and {'type':'image','src':...}. Images are
-    emitted in document order; surrounding text becomes paragraphs. Tables and
-    lists are flattened to readable text lines."""
+    """Convert authored HTML into an ordered list of content blocks:
+        {'type':'text','text':...}
+        {'type':'image','src':...}
+        {'type':'table','rows':[[{text,fill,header}, ...], ...]}
+    Tables are pulled out and rendered as real Word tables; the HTML around
+    them is processed normally for text and images, in document order."""
+    if not html:
+        return []
+
+    blocks = []
+    pos = 0
+    for tm in _TABLE_RE.finditer(html):
+        # everything before this table -> text/images
+        blocks.extend(_inline_html_to_blocks(html[pos:tm.start()]))
+        tbl = parse_html_table(tm.group(0))
+        if tbl:
+            blocks.append({"type": "table", **tbl})
+        pos = tm.end()
+    blocks.extend(_inline_html_to_blocks(html[pos:]))
+    return blocks
+
+
+def _inline_html_to_blocks(html: str):
+    """Handle a table-free HTML fragment: text paragraphs + inline images."""
     if not html:
         return []
     s = html
-    # Normalize <br> and block-closing tags to newlines so paragraph breaks survive.
     s = re.sub(r'(?i)<\s*br\s*/?\s*>', '\n', s)
-    s = re.sub(r'(?i)</\s*td\s*>', ' \u2502 ', s)     # cell separator (│)
     s = re.sub(r'(?i)</\s*(p|div|li|tr|h[1-6])\s*>', '\n', s)
-    s = re.sub(r'(?i)<\s*li[^>]*>', '\n\u2022 ', s)   # bullet marker for list items
+    s = re.sub(r'(?i)<\s*li[^>]*>', '\n\u2022 ', s)
 
     blocks = []
     pos = 0
     for m in _IMG_RE.finditer(s):
         pre = s[pos:m.start()]
-        txt = html_to_text(pre)
-        if txt:
+        if html_to_text(pre):
             for line in _split_paragraphs(pre):
                 blocks.append({"type": "text", "text": line})
         src = _html.unescape(m.group(1)).strip()
@@ -374,6 +444,9 @@ def extract_activity_content(activity: dict):
                     continue
                 etype = e.get("type")
                 if etype == "Embeddable::Xhtml":
+                    block_name = (e.get("name") or "").strip()
+                    if block_name:
+                        page_blocks.append({"type": "subheading", "text": block_name})
                     page_blocks.extend(html_to_blocks(e.get("content", "")))
                 elif etype == "ManagedInteractive":
                     qt = _embeddable_question_type(e)
@@ -513,7 +586,7 @@ class ConcordConverter:
 
         subtitle = tk.Label(
             header,
-            text="Convert Concord activities to PDF & DOCX",
+            text="Activities to PDF or Google Docs",
             font=("Segoe UI", 10), fg="#E3F2FD", bg=self.COLOR_PRIMARY
         )
         subtitle.pack(padx=20, anchor=tk.W)
@@ -546,30 +619,50 @@ class ConcordConverter:
         )
         browse_btn.pack(side=tk.LEFT)
 
-        # Options Card — output formats (PDF is always created)
+        # Options Card — three independent output formats
         card_opt = self._create_card(main, "Output options", bottom_pad=6)
 
         intro = tk.Label(
-            card_opt, text="A PDF is always created. Optionally also create:",
+            card_opt, text="Choose what to create:",
             font=("Segoe UI", 9), fg=self.COLOR_SUBTEXT, bg=self.BG_CARD
         )
         intro.pack(anchor=tk.W, padx=15, pady=(0, 6))
 
-        self.gdocs_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            card_opt, text="Google Docs version",
-            variable=self.gdocs_var, font=("Segoe UI", 10),
-            bg=self.BG_CARD, fg=self.COLOR_TEXT,
-            activebackground=self.BG_CARD, activeforeground=self.COLOR_PRIMARY
-        ).pack(anchor=tk.W, padx=15, pady=(0, 2))
+        big_cb = dict(font=("Segoe UI", 11), bg=self.BG_CARD, fg=self.COLOR_TEXT,
+                      activebackground=self.BG_CARD, activeforeground=self.COLOR_PRIMARY,
+                      selectcolor="white", padx=4, pady=2,
+                      borderwidth=0, highlightthickness=0)
 
+        # 1) PDF (with its two sub-options)
+        self.pdf_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(card_opt, text="PDF", variable=self.pdf_var,
+                       **big_cb).pack(anchor=tk.W, padx=15, pady=(0, 0))
+
+        # PDF sub-options: with vs without answers/feedback (mutually exclusive)
+        self.pdf_answers_var = tk.StringVar(value="with")
+        sub = tk.Frame(card_opt, bg=self.BG_CARD)
+        sub.pack(anchor=tk.W, padx=(48, 0), pady=(0, 4))
+        tk.Radiobutton(sub, text="With answers and choice feedback",
+                       variable=self.pdf_answers_var, value="with",
+                       font=("Segoe UI", 10), bg=self.BG_CARD, fg=self.COLOR_TEXT,
+                       activebackground=self.BG_CARD, selectcolor="white",
+                       highlightthickness=0).pack(anchor=tk.W)
+        tk.Radiobutton(sub, text="Without answers or feedback",
+                       variable=self.pdf_answers_var, value="without",
+                       font=("Segoe UI", 10), bg=self.BG_CARD, fg=self.COLOR_TEXT,
+                       activebackground=self.BG_CARD, selectcolor="white",
+                       highlightthickness=0).pack(anchor=tk.W)
+
+        # 2) Google Docs version
+        self.gdocs_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(card_opt, text="Google Docs version", variable=self.gdocs_var,
+                       **big_cb).pack(anchor=tk.W, padx=15, pady=(2, 0))
+
+        # 3) Word DOCX
         self.worddoc_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            card_opt, text="Word DOCX  (preserves the original page layout)",
-            variable=self.worddoc_var, font=("Segoe UI", 10),
-            bg=self.BG_CARD, fg=self.COLOR_TEXT,
-            activebackground=self.BG_CARD, activeforeground=self.COLOR_PRIMARY
-        ).pack(anchor=tk.W, padx=15, pady=(0, 12))
+        tk.Checkbutton(card_opt, text="Word DOCX  (preserves the original page layout)",
+                       variable=self.worddoc_var,
+                       **big_cb).pack(anchor=tk.W, padx=15, pady=(2, 12))
 
         # Status / Progress Card — clean progress bar only (no log strings)
         card_status = self._create_card(main, "Progress")
@@ -803,7 +896,9 @@ class ConcordConverter:
     def inject_answer_keys(self, driver, mcq_map: dict) -> int:
         injected = 0
         for ref_id, mcq in mcq_map.items():
-            if not mcq.get("has_feedback"):      # skip poll-style / no-feedback MCQs
+            # Show a box if the question has feedback OR a marked correct answer.
+            # Skip only poll-style questions (no feedback and nothing marked correct).
+            if not mcq.get("has_feedback") and not mcq.get("has_correct"):
                 continue
             try:
                 if driver.execute_script(_INJECT_JS, ref_id, build_answer_key_html(mcq)):
@@ -1174,6 +1269,60 @@ class ConcordConverter:
                 self.log(f"     [warn] could not embed image: {e}")
                 return False
 
+        def _embed_image_in_cell(cell, src):
+            """Download src and place it inside a table cell, scaled to fit."""
+            got = self._image_for_docx(src, driver=driver)
+            if not got:
+                return False
+            stream, w_px = got
+            try:
+                # cap avatar/image width so it fits a cell; ~1.1in works well
+                width_in = 1.1
+                if w_px:
+                    width_in = min(width_in, max(0.4, w_px / 96.0))
+                run = cell.paragraphs[0].add_run()
+                run.add_picture(stream, width=Inches(width_in))
+                cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                return True
+            except Exception as e:
+                self.log(f"     [warn] could not embed cell image: {e}")
+                return False
+
+        def add_table(rows):
+            """Render a parsed HTML table as a real Word table with borders,
+            header shading, per-cell background colors, and in-cell images
+            (e.g. conversation avatars)."""
+            if not rows:
+                return
+            ncols = max(len(r) for r in rows)
+            # A table is treated as having a header row only if its first row has
+            # no images (image tables like dialogues have no header).
+            has_any_image = any(c.get("image") for r in rows for c in r)
+            tbl = doc.add_table(rows=0, cols=ncols)
+            tbl.alignment = WD_TABLE_ALIGNMENT.CENTER
+            tbl.style = "Table Grid"
+            for r_idx, row in enumerate(rows):
+                cells = tbl.add_row().cells
+                for c_idx in range(ncols):
+                    cell = cells[c_idx]
+                    data = row[c_idx] if c_idx < len(row) else {}
+                    fill = data.get("fill")
+                    if fill:
+                        shade(cell, fill)
+                    img_src = data.get("image")
+                    if img_src and _embed_image_in_cell(cell, img_src):
+                        # if there's also text, add it below the image
+                        if data.get("text"):
+                            tp = cell.add_paragraph()
+                            tp.add_run(data["text"]).font.size = Pt(9)
+                    else:
+                        p = cell.paragraphs[0]
+                        run = p.add_run(data.get("text", ""))
+                        if data.get("header") or (r_idx == 0 and not has_any_image):
+                            run.bold = True
+                        run.font.size = Pt(9)
+            doc.add_paragraph()
+
         def add_iframe(blk):
             """iframe_interactive: a prompt (numbered question) plus its image
             (annotation background or video poster), and a video link if present."""
@@ -1237,8 +1386,15 @@ class ConcordConverter:
                 t = blk["type"]
                 if t == "text":
                     doc.add_paragraph(blk["text"])
+                elif t == "subheading":
+                    sp = doc.add_paragraph()
+                    sr = sp.add_run(blk["text"])
+                    sr.bold = True
+                    sr.font.size = Pt(13)
                 elif t == "image":
                     add_image(blk["src"], blk.get("caption", ""))
+                elif t == "table":
+                    add_table(blk["rows"])
                 elif t == "mcq":
                     add_mcq(blk["mcq"])
                 elif t == "open_response":
@@ -1366,33 +1522,51 @@ class ConcordConverter:
             title, pages = self.derive_metadata(info, data)
             safe_title = self.sanitize_filename(title)
 
-            include_fb = True
-            mcq_map = collect_mcqs(data) if include_fb else {}
-
+            want_pdf = self.pdf_var.get()
             want_gdocs = self.gdocs_var.get()
             want_word = self.worddoc_var.get()
+            pdf_with_answers = (self.pdf_answers_var.get() == "with")
+
+            if not (want_pdf or want_gdocs or want_word):
+                raise RuntimeError("Please select at least one output (PDF, Google Docs, or Word).")
+
+            # A PDF render is needed if the user wants the PDF itself OR the Word
+            # DOCX (which is built from the PDF). The answer keys are injected only
+            # when the user keeps the PDF AND chooses the "with answers" option.
+            need_pdf_render = want_pdf or want_word
+            inject_answers = want_pdf and pdf_with_answers
+
+            mcq_map = collect_mcqs(data) if inject_answers else {}
+
+            outputs = []
+            pdf_path = None
 
             driver = self.get_driver()
-            pdf_path = self.render_and_merge(
-                driver, info, pages, safe_title, out_dir, temp_dir, mcq_map, include_fb
-            )
-            self.set_progress(55)
-            self.log("[ok] PDF complete")
-            outputs = [f"PDF:\n{pdf_path}"]
+
+            if need_pdf_render:
+                self.set_progress(35)
+                pdf_path = self.render_and_merge(
+                    driver, info, pages, safe_title, out_dir, temp_dir,
+                    mcq_map, inject_answers
+                )
+                if want_pdf:
+                    self.log("[ok] PDF complete")
+                    outputs.append(f"PDF:\n{pdf_path}")
+                self.set_progress(60)
 
             if want_gdocs:
                 self.set_status("Working\u2026")
-                self.set_progress(65)
+                self.set_progress(70)
                 gdocs_path, _ = self.build_docx_from_json(
                     data, info, title, out_dir, driver=driver
                 )
                 self.log("[ok] Google Docs version complete")
                 outputs.append(f"Google Docs version:\n{gdocs_path}")
-                self.set_progress(80)
+                self.set_progress(82)
 
             if want_word:
                 self.set_status("Working\u2026")
-                self.set_progress(85)
+                self.set_progress(88)
                 word_path, _ = self.build_docx_highfidelity(pdf_path, title, out_dir)
                 self.log("[ok] Word DOCX complete")
                 outputs.append(f"Word DOCX:\n{word_path}")
