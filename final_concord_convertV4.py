@@ -677,9 +677,13 @@ class ConcordConverter:
             candidates = [
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+                "/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev",
+                "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
                 "/Applications/Chromium.app/Contents/MacOS/Chromium",
                 os.path.expanduser(
                     "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+                os.path.expanduser(
+                    "~/Applications/Google Chrome Dev.app/Contents/MacOS/Google Chrome Dev"),
             ]
         elif sys.platform.startswith("win"):  # Windows
             pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
