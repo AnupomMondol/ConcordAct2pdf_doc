@@ -24,6 +24,8 @@ jobs:
         run: |
           pyinstaller --onefile --windowed \
             --name "ConcordAptConverter" \
+            --collect-all selenium \
+            --collect-all webdriver_manager \
             final_concord_convertV4.py
       - name: Zip the .app (preserves Mac permissions)
         run: |
