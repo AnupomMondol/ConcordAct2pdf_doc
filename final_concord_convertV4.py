@@ -668,6 +668,40 @@ class ConcordConverter:
             counter += 1
         return candidate
 
+    @staticmethod
+    def _find_chrome_binary():
+        """Locate the installed Chrome/Chromium executable across platforms.
+        Returns a path string, or None to let Selenium auto-detect."""
+        candidates = []
+        if sys.platform == "darwin":  # macOS
+            candidates = [
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                os.path.expanduser(
+                    "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            ]
+        elif sys.platform.startswith("win"):  # Windows
+            pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+            pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+            local = os.environ.get("LOCALAPPDATA", "")
+            candidates = [
+                os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+                os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+            ]
+        else:  # Linux
+            candidates = [
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/chromium-browser",
+                "/usr/bin/chromium",
+            ]
+        for path in candidates:
+            if path and os.path.exists(path):
+                return path
+        return None
+
     def get_driver(self) -> webdriver.Chrome:
         opts = Options()
         opts.add_argument("--headless=new")
@@ -679,7 +713,22 @@ class ConcordConverter:
         opts.add_argument("--disable-software-rasterizer")
         opts.add_argument("--mute-audio")
         opts.add_experimental_option("excludeSwitches", ["enable-logging"])
-        return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+
+        chrome_path = self._find_chrome_binary()
+        if chrome_path:
+            opts.binary_location = chrome_path
+            self.log(f"[info] using Chrome at: {chrome_path}")
+
+        try:
+            return webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()), options=opts)
+        except Exception as e:
+            if not chrome_path:
+                raise RuntimeError(
+                    "Google Chrome was not found. Please install Google Chrome from "
+                    "https://www.google.com/chrome and try again."
+                ) from e
+            raise
 
     # ── URL / metadata ───────────────────────────────────────────────────────
     def extract_activity_info(self, url: str) -> dict:
