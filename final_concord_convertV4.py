@@ -462,7 +462,7 @@ class ConcordConverter:
     def __init__(self, root: tk.Tk, ui_scale: float = 1.0):
         self.root = root
         self.ui_scale = ui_scale if ui_scale and ui_scale > 0 else 1.0
-        self.root.title("Concord Platform Converter")
+        self.root.title("Concord Activity Converter")
         w = int(750 * self.ui_scale)
         h = int(720 * self.ui_scale)
         self.root.geometry(f"{w}x{h}")
@@ -506,7 +506,7 @@ class ConcordConverter:
         header.pack_propagate(False)
 
         title = tk.Label(
-            header, text="Concord Platform Converter",
+            header, text="Concord Activity Converter",
             font=("Segoe UI", 22, "bold"), fg="white", bg=self.COLOR_PRIMARY
         )
         title.pack(pady=12, padx=20, anchor=tk.W)
@@ -547,7 +547,7 @@ class ConcordConverter:
         browse_btn.pack(side=tk.LEFT)
 
         # Options Card — output formats (PDF is always created)
-        card_opt = self._create_card(main, "Output options")
+        card_opt = self._create_card(main, "Output options", bottom_pad=6)
 
         intro = tk.Label(
             card_opt, text="A PDF is always created. Optionally also create:",
@@ -557,7 +557,7 @@ class ConcordConverter:
 
         self.gdocs_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
-            card_opt, text="Google Docs version  (structured & editable)",
+            card_opt, text="Google Docs version",
             variable=self.gdocs_var, font=("Segoe UI", 10),
             bg=self.BG_CARD, fg=self.COLOR_TEXT,
             activebackground=self.BG_CARD, activeforeground=self.COLOR_PRIMARY
@@ -569,7 +569,7 @@ class ConcordConverter:
             variable=self.worddoc_var, font=("Segoe UI", 10),
             bg=self.BG_CARD, fg=self.COLOR_TEXT,
             activebackground=self.BG_CARD, activeforeground=self.COLOR_PRIMARY
-        ).pack(anchor=tk.W, padx=15, pady=(0, 15))
+        ).pack(anchor=tk.W, padx=15, pady=(0, 12))
 
         # Status / Progress Card — clean progress bar only (no log strings)
         card_status = self._create_card(main, "Progress")
@@ -612,13 +612,13 @@ class ConcordConverter:
         )
         close_btn.pack(side=tk.LEFT, padx=10)
 
-    def _create_card(self, parent, title):
+    def _create_card(self, parent, title, bottom_pad=15):
         """Create a styled card (frame with title)."""
         card = tk.Frame(
             parent, bg=self.BG_CARD, relief=tk.FLAT,
             highlightthickness=1, highlightbackground=self.COLOR_BORDER
         )
-        card.pack(fill=tk.X, pady=(0, 15))
+        card.pack(fill=tk.X, pady=(0, bottom_pad))
 
         label = tk.Label(
             card, text=title,
