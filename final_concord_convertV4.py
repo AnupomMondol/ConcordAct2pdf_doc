@@ -207,6 +207,22 @@ def build_answer_key_html(mcq: dict) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 _IMG_RE = re.compile(r'<img\b[^>]*?\bsrc\s*=\s*["\']([^"\']+)["\'][^>]*>', re.I)
 _TABLE_RE = re.compile(r'(?is)<table\b.*?</table>')
+_IFRAME_RE = re.compile(r'(?is)<iframe\b[^>]*?\bsrc\s*=\s*["\']([^"\']+)["\'][^>]*?>\s*</iframe>')
+_LINK_RE = re.compile(r'(?is)<a\b[^>]*?\bhref\s*=\s*["\']([^"\']+)["\'][^>]*?>(.*?)</a>')
+
+
+def _youtube_watch_url(src: str) -> str:
+    """Turn a YouTube embed URL into a normal watchable link, preserving start time."""
+    src = _html.unescape(src or "")
+    m = re.search(r'youtube(?:-nocookie)?\.com/embed/([\w-]+)', src)
+    if not m:
+        return src
+    vid = m.group(1)
+    start = ""
+    sm = re.search(r'[?&]start=(\d+)', src)
+    if sm:
+        start = f"&t={sm.group(1)}s"
+    return f"https://www.youtube.com/watch?v={vid}{start}"
 _TR_RE = re.compile(r'(?is)<tr\b[^>]*>(.*?)</tr>')
 _CELL_RE = re.compile(r'(?is)<(t[dh])\b([^>]*)>(.*?)</\1>')
 
@@ -278,7 +294,27 @@ def html_to_blocks(html: str):
 
 
 def _inline_html_to_blocks(html: str):
-    """Handle a table-free HTML fragment: text paragraphs + inline images."""
+    """Handle a table-free HTML fragment: text paragraphs (with hyperlinks),
+    inline images, and embedded videos (iframes)."""
+    if not html:
+        return []
+
+    # Pull out <iframe> embeds first (YouTube etc.) -> video blocks, in order.
+    blocks = []
+    pos = 0
+    for m in _IFRAME_RE.finditer(html):
+        blocks.extend(_fragment_text_and_images(html[pos:m.start()]))
+        url = _youtube_watch_url(m.group(1))
+        if url:
+            blocks.append({"type": "video", "url": url})
+        pos = m.end()
+    blocks.extend(_fragment_text_and_images(html[pos:]))
+    return blocks
+
+
+def _fragment_text_and_images(html: str):
+    """Within an iframe-free fragment: emit text paragraphs (preserving links)
+    and inline images, in document order."""
     if not html:
         return []
     s = html
@@ -290,27 +326,71 @@ def _inline_html_to_blocks(html: str):
     pos = 0
     for m in _IMG_RE.finditer(s):
         pre = s[pos:m.start()]
-        if html_to_text(pre):
-            for line in _split_paragraphs(pre):
-                blocks.append({"type": "text", "text": line})
+        blocks.extend(_paragraphs_with_links(pre))
         src = _html.unescape(m.group(1)).strip()
         if src and not src.lower().startswith("data:"):
             blocks.append({"type": "image", "src": src})
         pos = m.end()
-    tail = s[pos:]
-    if html_to_text(tail):
-        for line in _split_paragraphs(tail):
-            blocks.append({"type": "text", "text": line})
+    blocks.extend(_paragraphs_with_links(s[pos:]))
     return blocks
 
 
-def _split_paragraphs(html_fragment: str):
-    """Strip tags then split on newlines into non-empty, readable lines."""
-    # Replace block boundaries already converted to \n above; strip remaining tags.
-    raw = _TAG_RE.sub("", html_fragment)
-    raw = _html.unescape(raw)
-    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in raw.split("\n")]
-    return [ln for ln in lines if ln]
+def _paragraphs_with_links(html_fragment: str):
+    """Split an HTML fragment into paragraph blocks. Each block is either a plain
+    {'type':'text','text':...} or, when it contains <a href> links,
+    {'type':'richtext','segments':[{'text':..,'href':None|url}, ...]}."""
+    if not html_fragment:
+        return []
+    # Split into lines on the newlines we inserted for block boundaries.
+    out = []
+    for line in html_fragment.split("\n"):
+        if "<a " not in line.lower():
+            txt = html_to_text(line)
+            if txt:
+                out.append({"type": "text", "text": txt})
+            continue
+        # Build ordered segments of plain text and links.
+        segments = []
+        p = 0
+        for lm in _LINK_RE.finditer(line):
+            pre = html_to_text(line[p:lm.start()])
+            if pre:
+                segments.append({"text": pre, "href": None})
+            href = _html.unescape(lm.group(1)).strip()
+            label = html_to_text(lm.group(2)) or href
+            segments.append({"text": label, "href": href})
+            p = lm.end()
+        tail = html_to_text(line[p:])
+        if tail:
+            segments.append({"text": tail, "href": None})
+        segments = [seg for seg in segments if seg["text"]]
+        if segments:
+            out.append({"type": "richtext", "segments": segments})
+    return out
+
+
+def _add_hyperlink(paragraph, url, text):
+    """Add a clickable hyperlink (blue, underlined) to a python-docx paragraph.
+    python-docx has no native hyperlink API, so we build the XML directly."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+    new_run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    color = OxmlElement("w:color"); color.set(qn("w:val"), "1155CC"); rPr.append(color)
+    u = OxmlElement("w:u"); u.set(qn("w:val"), "single"); rPr.append(u)
+    new_run.append(rPr)
+    t = OxmlElement("w:t"); t.text = text; new_run.append(t)
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+    return hyperlink
 
 
 def parse_open_response(node: dict):
@@ -619,50 +699,36 @@ class ConcordConverter:
         )
         browse_btn.pack(side=tk.LEFT)
 
-        # Options Card — three independent output formats
+        # Options Card — three independent output formats, shown as clear
+        # selectable cards that highlight when chosen.
         card_opt = self._create_card(main, "Output options", bottom_pad=6)
 
         intro = tk.Label(
-            card_opt, text="Choose what to create:",
+            card_opt, text="Click to select what to create (selected = blue):",
             font=("Segoe UI", 9), fg=self.COLOR_SUBTEXT, bg=self.BG_CARD
         )
-        intro.pack(anchor=tk.W, padx=15, pady=(0, 6))
+        intro.pack(anchor=tk.W, padx=15, pady=(0, 8))
 
-        big_cb = dict(font=("Segoe UI", 11), bg=self.BG_CARD, fg=self.COLOR_TEXT,
-                      activebackground=self.BG_CARD, activeforeground=self.COLOR_PRIMARY,
-                      selectcolor="white", padx=4, pady=2,
-                      borderwidth=0, highlightthickness=0)
-
-        # 1) PDF (with its two sub-options)
         self.pdf_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(card_opt, text="PDF", variable=self.pdf_var,
-                       **big_cb).pack(anchor=tk.W, padx=15, pady=(0, 0))
+        self.gdocs_var = tk.BooleanVar(value=True)
+        self.worddoc_var = tk.BooleanVar(value=False)
+
+        self._make_option_toggle(card_opt, self.pdf_var, "PDF")
 
         # PDF sub-options: with vs without answers/feedback (mutually exclusive)
         self.pdf_answers_var = tk.StringVar(value="with")
         sub = tk.Frame(card_opt, bg=self.BG_CARD)
-        sub.pack(anchor=tk.W, padx=(48, 0), pady=(0, 4))
-        tk.Radiobutton(sub, text="With answers and choice feedback",
-                       variable=self.pdf_answers_var, value="with",
-                       font=("Segoe UI", 10), bg=self.BG_CARD, fg=self.COLOR_TEXT,
-                       activebackground=self.BG_CARD, selectcolor="white",
-                       highlightthickness=0).pack(anchor=tk.W)
-        tk.Radiobutton(sub, text="Without answers or feedback",
-                       variable=self.pdf_answers_var, value="without",
-                       font=("Segoe UI", 10), bg=self.BG_CARD, fg=self.COLOR_TEXT,
-                       activebackground=self.BG_CARD, selectcolor="white",
-                       highlightthickness=0).pack(anchor=tk.W)
+        sub.pack(anchor=tk.W, fill=tk.X, padx=(46, 15), pady=(2, 6))
+        for label, val in (("With answers and choice feedback", "with"),
+                           ("Without answers or feedback", "without")):
+            tk.Radiobutton(sub, text=label, variable=self.pdf_answers_var, value=val,
+                           font=("Segoe UI", 10), bg=self.BG_CARD, fg=self.COLOR_TEXT,
+                           activebackground=self.BG_CARD, selectcolor="white",
+                           highlightthickness=0).pack(anchor=tk.W)
 
-        # 2) Google Docs version
-        self.gdocs_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(card_opt, text="Google Docs version", variable=self.gdocs_var,
-                       **big_cb).pack(anchor=tk.W, padx=15, pady=(2, 0))
-
-        # 3) Word DOCX
-        self.worddoc_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(card_opt, text="Word DOCX  (preserves the original page layout)",
-                       variable=self.worddoc_var,
-                       **big_cb).pack(anchor=tk.W, padx=15, pady=(2, 12))
+        self._make_option_toggle(card_opt, self.gdocs_var, "Google Docs version")
+        self._make_option_toggle(card_opt, self.worddoc_var,
+                                 "Word DOCX   (preserves the original page layout)")
 
         # Status / Progress Card — clean progress bar only (no log strings)
         card_status = self._create_card(main, "Progress")
@@ -721,6 +787,45 @@ class ConcordConverter:
         label.pack(anchor=tk.W, padx=15, pady=(12, 10))
 
         return card
+
+    def _make_option_toggle(self, parent, var, text):
+        """A clickable option row that clearly highlights when selected:
+        blue background + checkmark when on, light grey when off."""
+        ON_BG, ON_FG = self.COLOR_PRIMARY, "white"
+        OFF_BG, OFF_FG = "#EEF1F4", self.COLOR_TEXT
+
+        row = tk.Frame(parent, bg=self.BG_CARD)
+        row.pack(fill=tk.X, padx=15, pady=3)
+
+        box = tk.Frame(row, bg=OFF_BG, highlightthickness=1,
+                       highlightbackground="#CBD2D9", cursor="hand2")
+        box.pack(fill=tk.X)
+
+        mark = tk.Label(box, text="\u2713", font=("Segoe UI", 12, "bold"),
+                        width=2, bg=OFF_BG, fg=OFF_BG)  # hidden when off
+        mark.pack(side=tk.LEFT, padx=(10, 2), pady=8)
+        lbl = tk.Label(box, text=text, font=("Segoe UI", 11),
+                       bg=OFF_BG, fg=OFF_FG, anchor="w", cursor="hand2")
+        lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=8)
+
+        def refresh():
+            on = var.get()
+            bg = ON_BG if on else OFF_BG
+            fg = ON_FG if on else OFF_FG
+            for w in (box, mark, lbl):
+                w.configure(bg=bg)
+            lbl.configure(fg=fg)
+            mark.configure(fg=("white" if on else bg))  # check visible only when on
+            box.configure(highlightbackground=(ON_BG if on else "#CBD2D9"))
+
+        def toggle(_evt=None):
+            var.set(not var.get())
+            refresh()
+
+        for w in (box, mark, lbl):
+            w.bind("<Button-1>", toggle)
+        refresh()
+        return row
 
     def _browse_folder(self):
         folder = filedialog.askdirectory()
@@ -1386,6 +1491,18 @@ class ConcordConverter:
                 t = blk["type"]
                 if t == "text":
                     doc.add_paragraph(blk["text"])
+                elif t == "richtext":
+                    rp = doc.add_paragraph()
+                    for seg in blk["segments"]:
+                        if seg.get("href"):
+                            _add_hyperlink(rp, seg["href"], seg["text"])
+                        else:
+                            rp.add_run(seg["text"])
+                elif t == "video":
+                    vp = doc.add_paragraph()
+                    vr = vp.add_run("Video: ")
+                    vr.bold = True
+                    _add_hyperlink(vp, blk["url"], blk["url"])
                 elif t == "subheading":
                     sp = doc.add_paragraph()
                     sr = sp.add_run(blk["text"])
